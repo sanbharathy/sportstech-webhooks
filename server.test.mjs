@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createApp, publicIPv4, validateDestination, deliver } from './server.mjs';
 async function start(options={}) {
-  const app=createApp({password:'test-password-strong',...options});
+  const app=await createApp({password:'test-password-strong',...options});
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
   const base=`http://127.0.0.1:${app.server.address().port}`;let cookie='';
   const call=async(p,method='GET',body,headers={})=>{const r=await fetch(base+p,{method,headers:{...(cookie?{Cookie:cookie}:{}),'Content-Type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return {status:r.status,data:await r.json()};};
