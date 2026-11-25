@@ -65,6 +65,9 @@ export async function createApp({ database = ':memory:', connectionString, passw
       body TEXT NOT NULL, content_type TEXT NOT NULL, headers TEXT NOT NULL, status TEXT NOT NULL, response_code INTEGER,
       error TEXT, created_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS events_hook ON events(hook_id, created_at);
+    CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, hook_id TEXT NOT NULL REFERENCES hooks(id) ON DELETE CASCADE,
+      body TEXT NOT NULL, content_type TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS inbox_hook ON inbox(hook_id, status, created_at);
     CREATE TABLE IF NOT EXISTS sessions (key TEXT PRIMARY KEY, expires BIGINT NOT NULL);
     CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires BIGINT NOT NULL);`);
   await db.prepare("UPDATE events SET status='failed',error='Delivery did not complete before the worker stopped' WHERE status='pending' AND created_at<?").run(new Date(Date.now()-120000).toISOString());
@@ -119,6 +122,22 @@ export async function createApp({ database = ':memory:', connectionString, passw
     try {
       const url = new URL(req.url,'http://localhost'), p = url.pathname, method = req.method;
       if (p.startsWith('/hooks/')) {
+        const inbox = p.match(/^\/hooks\/([^/]+)\/inbox(\/ack)?$/);
+        if (inbox) {
+          const h = await hook(inbox[1]);
+          const token = req.headers['x-webhook-key'] || req.headers.authorization?.replace(/^Bearer /i,'') || '';
+          if (typeof token !== 'string' || !same(hash(token),h.key_hash)) throw fail(401,'Invalid webhook passkey.');
+          if (!h.active) throw fail(403,'This webhook is paused.');
+          if (!(await allow(`inbox:${h.id}`,600))) throw fail(429,'Inbox limit reached. Retry in one minute.');
+          if (method === 'GET' && !inbox[2]) return send(200,{messages:await db.prepare("SELECT id,body,content_type,created_at FROM inbox WHERE hook_id=? AND status='queued' ORDER BY created_at,rowid LIMIT 50").all(h.id)});
+          if (method === 'POST' && inbox[2]) {
+            const ids = (await jsonBody(req))?.ids;
+            if (!Array.isArray(ids) || ids.length > 100 || !ids.every(id => typeof id === 'string')) throw fail(400,'Send up to 100 message IDs in ids.');
+            for (const id of ids) await db.prepare("UPDATE inbox SET status='acked' WHERE hook_id=? AND id=? AND status='queued'").run(h.id,id);
+            return send(200,{ok:true});
+          }
+          throw fail(405,'Use GET /inbox to read messages or POST /inbox/ack to confirm them.');
+        }
         if (method !== 'POST') throw fail(405,'Use POST to send a webhook event.');
         const h = await hook(p.slice(7));
         const token = req.headers['x-webhook-key'] || req.headers.authorization?.replace(/^Bearer /i,'') || '';
@@ -153,13 +172,21 @@ export async function createApp({ database = ':memory:', connectionString, passw
           await db.prepare('INSERT INTO hooks (id,name,description,destination,key_hash,key_hint,created_at) VALUES (?,?,?,?,?,?,?)').run(id,f.name,f.description,f.destination,hash(key),key.slice(-6),new Date().toISOString());
           return send(201,{hook:visible(await hook(id)),key});
         }
-        const match = p.match(/^\/api\/hooks\/([^/]+)(?:\/(rotate|events|test))?$/);
+        const match = p.match(/^\/api\/hooks\/([^/]+)(?:\/(rotate|events|test|messages))?$/);
         if (match) {
           const h = await hook(match[1]), action = match[2];
           if (!action && method === 'PATCH') { const b = await jsonBody(req), f = fields({...h,...b}); if (b.active !== undefined && typeof b.active !== 'boolean') throw fail(400,'Active must be true or false.'); await db.prepare('UPDATE hooks SET name=?,description=?,destination=?,active=? WHERE id=?').run(f.name,f.description,f.destination,b.active === undefined ? h.active : +b.active,h.id); return send(200,{hook:visible(await hook(h.id))}); }
           if (!action && method === 'DELETE') { await db.prepare('DELETE FROM hooks WHERE id=?').run(h.id); return send(200,{ok:true}); }
           if (action === 'rotate' && method === 'POST') { const key = secret(); await db.prepare('UPDATE hooks SET key_hash=?,key_hint=? WHERE id=?').run(hash(key),key.slice(-6),h.id); return send(200,{key}); }
           if (action === 'events' && method === 'GET') return send(200,{events:await db.prepare('SELECT * FROM events WHERE hook_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100').all(h.id)});
+          if (action === 'messages' && method === 'GET') return send(200,{messages:await db.prepare('SELECT id,body,content_type,status,created_at FROM inbox WHERE hook_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100').all(h.id)});
+          if (action === 'messages' && method === 'POST') {
+            const b = await jsonBody(req);
+            if (typeof b?.body !== 'string' || !b.body || Buffer.byteLength(b.body) > 1024*1024) throw fail(400,'Message body must be 1 byte to 1 MB of text.');
+            const id = randomUUID();
+            await db.prepare("INSERT INTO inbox (id,hook_id,body,content_type,status,created_at) VALUES (?,?,?,?,'queued',?)").run(id,h.id,b.body,'text/plain; charset=utf-8',new Date().toISOString());
+            return send(201,{id,status:'queued'});
+          }
           if (action === 'test' && method === 'POST') { if (!h.active) throw fail(403,'Resume the webhook before testing.'); if (!(await allow(`hook:${h.id}`,120)) || jobs.size >= 50) throw fail(429,'Please retry shortly.'); return send(202,await record(h,JSON.stringify({event:'webhook.test',source:'Sportstech dashboard',timestamp:new Date().toISOString()}),'application/json',{'user-agent':'Sportstech dashboard'})); }
         }
         throw fail(404,'API route not found.');

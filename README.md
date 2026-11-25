@@ -70,3 +70,13 @@ npm test
 Integration tests cover admin authentication, origin protection, creating and deleting hooks, secret redaction, receiving events, rotating keys, pausing/resuming, payload limits, logout, persistence across restarts, forwarding success and failures, and destination restrictions. Forwarding tests use an injected transport; delivery to an actual external service must be verified with your chosen destination.
 
 The server uses Node's built-in SQLite module: https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html
+
+## Bot inbox (messages to a bot)
+
+Each webhook also has an inbox for messages sent *to* the bot, so a bot without a public URL can receive them.
+
+- Admin sends a message: `POST /api/hooks/:id/messages` with `{"body":"..."}` (dashboard session required). Returns `201` and status `queued`.
+- Bot reads queued messages: `GET /hooks/:id/inbox` with `X-Webhook-Key: YOUR_PASSKEY`. Returns up to 50 oldest queued messages.
+- Bot confirms them: `POST /hooks/:id/inbox/ack` with the same passkey and `{"ids":["..."]}`. Acknowledged messages are not returned again.
+
+Delivery is at-least-once: a message not acknowledged is returned again on the next read, so bots should de-duplicate by `id`.

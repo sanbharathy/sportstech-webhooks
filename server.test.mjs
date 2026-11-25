@@ -51,3 +51,18 @@ test('public forwarding rejects local, reserved, credentialed, and insecure dest
  await assert.rejects(()=>deliver('https://127.0.0.1','{}','application/json','id'));
  const app=await start();try{await app.call('/api/login','POST',{password:'test-password-strong'});for(const body of [{name:''},{name:'a',description:123},{name:'a',destination:'http://example.com'}])assert.equal((await app.call('/api/hooks','POST',body)).status,400);}finally{await app.close();}
 });
+test('bot inbox: admin queues messages, bot pulls with its passkey, then acknowledges',async()=>{
+ const app=await start();try{
+  await app.call('/api/login','POST',{password:'test-password-strong'});
+  const {hook,key}=(await app.call('/api/hooks','POST',{name:'Hermes'})).data;
+  const inbox=`/hooks/${hook.id}/inbox`;
+  assert.equal((await app.call(inbox)).status,401);
+  assert.equal((await app.call(`/api/hooks/${hook.id}/messages`,'POST',{body:'hello hermes'})).status,201);
+  assert.equal((await app.call(`/api/hooks/${hook.id}/messages`,'POST',{body:''})).status,400);
+  const got=await app.call(inbox,'GET',undefined,{'X-Webhook-Key':key});
+  assert.equal(got.status,200);assert.equal(got.data.messages[0].body,'hello hermes');
+  assert.equal((await app.call(`/hooks/${hook.id}/inbox/ack`,'POST',{ids:[got.data.messages[0].id]},{'X-Webhook-Key':key})).status,200);
+  assert.equal((await app.call(inbox,'GET',undefined,{'X-Webhook-Key':key})).data.messages.length,0);
+  assert.equal((await app.call(`/api/hooks/${hook.id}/messages`)).data.messages[0].status,'acked');
+ }finally{await app.close();}
+});
